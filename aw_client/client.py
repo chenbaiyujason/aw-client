@@ -85,16 +85,28 @@ class ActivityWatchClient:
         _config = load_config()
         server_config = _config["server" if not testing else "server-testing"]
         client_config = _config["client" if not testing else "client-testing"]
+        remote_section = "server-remote-testing" if testing else "server-remote"
+        remote_config = _config.get(remote_section)
+        if remote_config is None:
+            remote_config = {}
 
         server_host = host or server_config["hostname"]
         server_port = port or server_config["port"]
-        self.server_address = f"{protocol}://{server_host}:{server_port}"
+        self.server_address = f"{protocol}://{server_host}:{str(server_port)}"
+
+        # 可选远程宿主机地址，用于双写（best-effort）；None 表示不双写
+        self.remote_server_address = None
+        if remote_config.get("enabled") and remote_config.get("hostname"):
+            rh = remote_config["hostname"]
+            rp = str(remote_config.get("port", "5600"))
+            self.remote_server_address = f"{protocol}://{rh}:{rp}"
 
         self.instance = SingleInstance(
             f"{self.client_name}-at-{server_host}-on-{server_port}"
         )
 
         self.commit_interval = client_config["commit_interval"]
+        self._protocol = protocol
 
         self.request_queue = RequestQueue(self)
         # Dict of each last heartbeat in each bucket
@@ -118,6 +130,7 @@ class ActivityWatchClient:
         data: Union[List[Any], Dict[str, Any]],
         params: Optional[dict] = None,
     ) -> req.Response:
+        """发往本机（primary）。"""
         headers = {"Content-type": "application/json", "charset": "utf-8"}
         return req.post(
             self._url(endpoint),
@@ -125,6 +138,29 @@ class ActivityWatchClient:
             headers=headers,
             params=params,
         )
+
+    def _post_remote(
+        self,
+        endpoint: str,
+        data: Union[List[Any], Dict[str, Any]],
+        params: Optional[dict] = None,
+    ) -> None:
+        """Best-effort 发往远程宿主机；失败仅打 log，不抛异常、不入队。"""
+        if not self.remote_server_address:
+            return
+        url = f"{self.remote_server_address}/api/0/{endpoint}"
+        headers = {"Content-type": "application/json", "charset": "utf-8"}
+        try:
+            r = req.post(
+                url,
+                data=bytes(json.dumps(data), "utf8"),
+                headers=headers,
+                params=params,
+                timeout=10,
+            )
+            r.raise_for_status()
+        except req.RequestException as e:
+            logger.debug("Remote dual-write failed (%s): %s", url, e)
 
     @always_raise_for_request_errors
     def _delete(self, endpoint: str, data: Any = None) -> req.Response:
@@ -259,6 +295,7 @@ class ActivityWatchClient:
                 self.last_heartbeat[bucket_id] = event
         else:
             self._post(endpoint, event.to_json_dict())
+            self._post_remote(endpoint, event.to_json_dict())
 
     #
     #   Bucket get/post requests
@@ -278,6 +315,7 @@ class ActivityWatchClient:
                 "type": event_type,
             }
             self._post(endpoint, data)
+            self._post_remote(endpoint, data)
 
     def delete_bucket(self, bucket_id: str, force: bool = False):
         self._delete(f"buckets/{bucket_id}" + ("?force=1" if force else ""))
@@ -361,7 +399,35 @@ class ActivityWatchClient:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.disconnect()
 
+    def _apply_server_settings(self) -> None:
+        """用 server 的 settings（aw_client.*）覆盖本机/远程地址；连接失败则保留文件配置。"""
+        try:
+            r = req.get(self._url("settings"), timeout=5)
+            r.raise_for_status()
+            data = r.json()
+        except req.RequestException as e:
+            logger.debug("Could not fetch server settings for aw_client overlay: %s", e)
+            return
+        if not isinstance(data, dict):
+            return
+        sh = data.get("aw_client.server_hostname")
+        sp = data.get("aw_client.server_port")
+        if sh is not None:
+            port = str(sp) if sp is not None else "5600"
+            self.server_address = f"{self._protocol}://{sh}:{port}"
+            logger.info("Applied aw_client.server from settings: %s", self.server_address)
+        re_enabled = data.get("aw_client.remote_enabled")
+        rh = data.get("aw_client.remote_hostname")
+        rp = data.get("aw_client.remote_port")
+        if re_enabled and rh:
+            port = str(rp) if rp is not None else "5600"
+            self.remote_server_address = f"{self._protocol}://{rh}:{port}"
+            logger.info("Applied aw_client.remote from settings: %s", self.remote_server_address)
+        elif re_enabled is False or (re_enabled is None and (rh is None or rh == "")):
+            self.remote_server_address = None
+
     def connect(self):
+        self._apply_server_settings()
         if not self.request_queue.is_alive():
             self.request_queue.start()
 
@@ -480,6 +546,7 @@ class RequestQueue(threading.Thread):
 
         try:
             self.client._post(request.endpoint, request.data)
+            self.client._post_remote(request.endpoint, request.data)
         except req.exceptions.ConnectTimeout:
             # Triggered by:
             #   - server not running (connection refused)

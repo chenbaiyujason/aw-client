@@ -5,11 +5,22 @@ default_config = """
 hostname = "127.0.0.1"
 port = "5600"
 
+[server-remote]
+# 可选：远程宿主机，用于双写（本机 + 宿主机）；宿主机不可达时仅写本机，由 aw-sync 后续合并
+enabled = false
+hostname = ""
+port = "5600"
+
 [client]
 commit_interval = 10
 
 [server-testing]
 hostname = "127.0.0.1"
+port = "5666"
+
+[server-remote-testing]
+enabled = false
+hostname = ""
 port = "5666"
 
 [client-testing]

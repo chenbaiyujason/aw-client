@@ -57,6 +57,29 @@ Commands:
 ```
 
 
+## Dual-write (local + remote host)
+
+You can send each heartbeat and bucket create to **both** the local server and a remote host (e.g. a NAS or central machine). If the remote is unreachable, events are still written locally; [aw-sync](https://github.com/ActivityWatch/activitywatch/tree/master/aw-server-rust/aw-sync) can later merge data when the connection is back.
+
+**Option 1 – Web Settings (recommended)**  
+Open the ActivityWatch dashboard → **Settings** → **推送与同步（Client & 远程宿主机）**. Set the local server and optional remote host there; watchers will use these values after the next connect (e.g. restart). Use **测试连接** to check that the remote aw-server is reachable.
+
+**Option 2 – Config file**  
+In `aw-client.toml` (or platform config dir), add an optional `[server-remote]` section:
+
+```toml
+[server]
+hostname = "127.0.0.1"
+port = "5600"
+
+[server-remote]
+enabled = true
+hostname = "192.168.1.100"
+port = "5600"
+```
+
+If `enabled` is false or `hostname` is empty, only the primary server is used. Server-stored settings (from Web Settings) override file values when the client connects.
+
 ## Debugging
 
 * Run python with `LOG_LEVEL=debug` to get additional debugging output
